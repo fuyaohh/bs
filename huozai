@@ -1,0 +1,272 @@
+#include <reg52.h>
+#include <intrins.h>
+#include "lcd1602.h"
+#include "delay.h"
+
+#define Data_ADC0809 P1		 //定义P1口为Data_ADC0809 （之后的程序里Data_ADC0809即代表P1口）
+
+//ADC0808
+sbit ST=P2^3;
+sbit EOC=P2^4;
+sbit OE=P2^5;
+
+//报警灯以及蜂鸣器
+sbit LED=P2^6;
+sbit BUZZ=P2^7;
+
+uchar temp=0;			//温度值
+uchar yanwu_flag=0;  //有烟雾则为一，无烟雾则为零。
+uchar chufa_flag=0;//触发报警为1，关闭报警为零。
+uchar High_TM_Value=50;//  上限值
+uchar Low_TM_Value=0;//下限值
+
+bit alarm_flag=0;//报警标志位指示
+
+//四个按钮
+sbit KEY1=P3^4;    //+
+sbit KEY2=P3^5;    //-
+sbit KEY3=P3^6;    //set
+sbit KEY4=P3^7;   //ok
+
+
+//按键宏定义
+#define KEY1_PRESS 1
+#define KEY2_PRESS 2
+#define KEY3_PRESS 3
+#define KEY4_PRESS 4
+
+
+
+
+//按键扫描处理函数
+unsigned char KeyScan(unsigned char mode)
+{
+	 static	unsigned char key_up=1; //按键松开标志
+	  if(mode) key_up=1;//支持连按
+	   if(key_up&& (KEY1==0|| KEY2==0||KEY3==0||KEY4==0))
+		 {
+				Delay1ms(10);
+			  key_up=0;
+				if(KEY1==0)  return KEY1_PRESS;     //如果按键k1按下，返回KEY1_PRESS
+				else if(KEY2==0)  return KEY2_PRESS;//如果按键k2按下，返回KEY2_PRESS
+			  else if(KEY3==0)  return KEY3_PRESS;//如果按键k3按下，返回KEY3_PRESS
+			  else if(KEY4==0)  return KEY4_PRESS;	 //如果按键k4按下，返回KEY4_PRESS
+		 }else if(KEY1==1&&KEY2==1&&KEY3==1&&KEY4==1) key_up=1;
+	return 0; //无按键按下
+}
+
+
+
+//ADC0809读取信息
+uchar ADC0809()
+{
+	uchar temp_=0x00;
+	
+	//初始化高阻太
+
+	OE=0;
+	//转化初始化
+	ST=0;
+	//开始转换
+	ST=1;
+	ST=0;
+	//外部中断等待AD转换结束
+	while(EOC==0)
+	//读取转换的AD值
+	OE=1;
+	temp_=Data_ADC0809;
+	OE=0;
+	return temp_;
+}
+
+
+unsigned int AD_val;    //储存A/D转换后的值
+ float DATA_temp;
+unsigned char ADC_num[4] = {0,1,2,3};
+
+
+
+
+//在此函数中 显示当前的温度 与烟雾
+void display_task()
+{
+	 static uchar state=1;
+	    AD_val=ADC0809();	  //读取温度值
+			DATA_temp=AD_val*0.392;
+	
+       temp=(uchar)DATA_temp;
+			ADC_num[0] = temp/100;
+			ADC_num[1] = temp%100/10;
+			ADC_num[2] = temp%10;
+	
+			DisplayChars(0,1,"Temp=");
+			DisplayOneChar(5,1, ADC_num[0]);
+			DisplayOneChar(6,1, ADC_num[1]);
+			DisplayOneChar(7,1, ADC_num[2]);
+			DisplayOneChar(8,1,0xDF-0X30);
+			DisplayChars(9,1,"C");
+	 
+	     if(yanwu_flag)
+			 {
+					DisplayChars(0,0,"YW=");
+					DisplayOneChar(3,0,1);//烟雾值为1
+			 }else 
+			 {
+				DisplayChars(0,0,"YW=");
+					DisplayOneChar(3,0,0);//烟雾值为0
+			 }
+	
+
+			   		
+        switch(state)
+				{
+						case 1:  //低于最低温度低于最高温度  有烟雾，就启动报警
+											 if(temp<Low_TM_Value   || temp>High_TM_Value || yanwu_flag) 			 
+												{ 
+													 alarm_flag=1;//报警标志位
+													 LED=0;//声光报警
+													 BUZZ=1;
+												  if(chufa_flag)  //此时如果触发手动，则进入状态2
+													{  
+														state=2;	
+													  break;
+													}
+												}else  		//无烟雾、温度正常 则不报警
+												 {
+														alarm_flag=0;//无报警
+														LED=1;
+														BUZZ=0;
+												} 
+												 if(chufa_flag)// 无烟雾、温度正常，手动触发报警
+													{  
+														
+														LED=0;BUZZ=1//报警	
+													  break;
+													}
+												break;
+						case 2:   
+												if(alarm_flag)//如果仍然有报警，手动取消蜂鸣器报警
+												 { LED=0;BUZZ=0;}//不报警  只亮灯
+												else 
+												{ LED=1;BUZZ=0;}//灯灭 不报警
+												
+												if(chufa_flag==0)//再按下手动按键，则返回状态1
+													state=1;	
+                        break;													
+				}												
+}
+
+
+
+//外部中断0的中断服务函数。
+void INT0_ISR(void) interrupt 0
+{
+	  yanwu_flag=~yanwu_flag;//触发烟雾报警
+}
+
+//外部中断1的中断服务函数。
+void INT1_ISR(void) interrupt 2
+{
+		chufa_flag=~chufa_flag;//触发中断标志位
+}
+
+
+void main(void)
+{
+	 uchar t=0,state=0;
+		LCD_Init(); //1602LCD 初始化
+		IT0=1;//下降沿触发中断。
+	  IT1=1;//下降沿触发中断。
+	  EX1=1;//允许外部中断1中断。
+		EX0=1;//允许外部中断0中断。
+		EA=1;//开总中断。
+	
+	BUZZ=0;
+	while(1)
+	{
+		 	t= KeyScan(0);		
+	     
+		  switch(state)
+			{
+				case 0:  
+										display_task();//在此函数中 显示温度值和烟雾值，并比较上下限值
+										if(t==KEY1_PRESS)
+										{ 
+											state=1; 
+												Write_LCD_Command(0x01);// 清屏
+										break;
+										
+										}
+										else if(t==KEY2_PRESS) 
+										{ state=2; 
+										Write_LCD_Command(0x01);// 清屏
+										break;
+										}
+										break;
+				case 1:	
+					      DisplayChars(0,0,"H-TM:");
+								DisplayChars(0,1,"L-TM:");
+			
+								DisplayOneChar(5,0, High_TM_Value/100); //百
+								DisplayOneChar(6,0, High_TM_Value%100/10);//十
+								DisplayOneChar(7,0, High_TM_Value%10);//个
+			
+							  DisplayOneChar(5,1, Low_TM_Value/100);
+								DisplayOneChar(6,1, Low_TM_Value%100/10);
+								DisplayOneChar(7,1, Low_TM_Value%10);
+			
+								if(t==KEY1_PRESS)
+								{
+											High_TM_Value++;
+										if(High_TM_Value>80)
+											High_TM_Value=80;
+									
+								}else if(t==KEY2_PRESS)
+								{
+											High_TM_Value--;
+										if(High_TM_Value<1)
+											High_TM_Value=0;
+								}else if(t==KEY4_PRESS)
+								{	
+									state=0; 
+									Write_LCD_Command(0x01);// 清屏
+									break;
+								
+								}
+								break;
+				case 2:
+								DisplayChars(0,0,"H-TM:");
+								DisplayChars(0,1,"L-TM:");
+			
+								DisplayOneChar(5,0, High_TM_Value/100); //百
+								DisplayOneChar(6,0, High_TM_Value%100/10);//十
+								DisplayOneChar(7,0, High_TM_Value%10);//个
+			
+							  DisplayOneChar(5,1, Low_TM_Value/100);//百
+								DisplayOneChar(6,1, Low_TM_Value%100/10);//十
+								DisplayOneChar(7,1, Low_TM_Value%10);//个
+			
+								if(t==KEY1_PRESS)
+								{
+											Low_TM_Value++;
+										if(Low_TM_Value>80)
+											Low_TM_Value=80;
+								}else if(t==KEY2_PRESS)
+								{
+											Low_TM_Value--;
+										if(Low_TM_Value<1)
+											Low_TM_Value=0;
+								}else if(t==KEY4_PRESS)
+								{		
+										state=0; 
+										Write_LCD_Command(0x01);// 清屏
+										break;
+								}
+								break;
+				default:break;
+					
+			}
+
+	}
+
+}
